@@ -1,1 +1,4 @@
 # Prediction-on-Car-s-Performance-During-Highway-Driving
+This is a data analysis project collaboratively done by Mingyu Liu and me using **R Markdown**. In this report, we used the "auto" data set to build a linear model for the response highway_mpg –
+the car’s performance in miles per gallon during highway driving with all the other variables as potential covariates, and to draw appropriate conclusions regarding the associations of the response variable and the other covariates. <br />
+Selected covariates are: make, fuel_type, wheel_base, length, width, height, curb_weight, num_of_cylinders, engine_type, fuel_system, aspiration, bore, compression_rate; and interactions: make:compression_rate, length:compression_rate, fuel_type:compression_rate. In the end, we used cross-validation to obtain an elastic net model with the selected covariates that have great out-of-sample predictive power.
