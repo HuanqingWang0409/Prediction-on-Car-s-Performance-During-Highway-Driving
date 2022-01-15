@@ -1,0 +1,645 @@
+---
+title: "STAT34300 Data Project"
+author: "Mingyu Liu & Huanqing Wang"
+date: "2021/12/10"
+output: pdf_document
+---
+
+\section{1. Introduction}
+In this report, we aim to use the `auto` data set to build a linear model for the response `highway_mpg` -- the car’s performance in miles per gallon during highway driving with all the other variables as potential covariates, and to draw appropriate conclusions regarding the associations of the response variable and the other covariates. The raw data set consists of $205$ data points associated with $22$ variables. Among the $22$ variables, $9$ of them are categorical, and the remaining $13$ are numerical. 
+
+There are three main challenges facing this investigation. First of all, there is a large number of missing values contained in our data set, dropping which will throw away useful information that allows more precise inference. Carefully designed imputation strategies needs to be implemented in order to address the missing value problem appropriately. Secondly, the number of data points (hence the total degrees of freedom available) is relatively small compared to the number of covariate levels. This is particularly challenging if we want to build large models taking the effects of interactions into account. Proper model selection procedures need to be designed to perform model selection correctly. Finally, there exists exact collinearity between levels of categorical covariates, making estimation and inference of coefficients challenging. Ridge/LASSO regression methods will be necessary in order for the coefficients to be accurately estimated. 
+
+The report is structured as follows. In Section 2, we will pre-process the data and carry out imputation. Next, in Section 3, we will investigate the structure of all the possible covariates and check for outliers and high leverage points. Then, in Section 4, we will perform model selection, including searching for significant covariates and interaction effects. We will discuss model interpretation in Section 5 before conclusion in Section 6. 
+
+\section{2. Data Pre-Processing}
+In this section, we load and pre-process the data. In particular, we will implement imputation strategies to deal with missing values in the data set. We first load the `auto` data set and convert all the "?" entries to `NA`. 
+```{r, warning=FALSE}
+library(faraway)
+library(glmnet)
+library(Matrix)
+library(MASS)
+auto = read.csv(
+  "./auto.txt",
+  sep = "",
+  na.strings = "?",
+  stringsAsFactors = TRUE
+)
+```
+
+Among the covariates with missing values, `num_of_doors` is categorical. Performing imputation on categorical covariates is challenging -- regression-based methods are usually not well-suited for this type of problem, different imputation strategies are usually needed depending on whether the covariate is nominal or ordinal. The `amelia` package provides an easy-to-use multiple imputation method. However, this is unsuccessful in our data set due to exact collinearity among levels of other categorical covariates, which makes the data matrix singular. 
+```{r, warning=FALSE}
+print(nrow(auto))
+print(colSums(is.na(auto))[which(colSums(is.na(auto)) > 0)])
+```
+
+Since the variable `num_of_doors` only has two missing values, we simply remove the two points with `num_of_doors` missing, given the difficulty of imputing categorical variables. Removing the two points will introduce minimal bias into our regression analysis. With little prior knowledge about the cause of missing values, we assume missing values occur completely at random. We decide to perform imputation with regression for the remaining covariates. 
+
+A choice of the order of imputation also needs to be made. `normalized_losses` has the largest number of $41$ missing values more than any other variables, and we decide to impute it last. All other covariates with missing values have exactly two missing points, so the order is less important. We decide to follow the column order: `bore` $\rightarrow$ `stroke` $\rightarrow$ `peak_rpm` $\rightarrow$ `horsepower` and lastly `normalized_losses`.
+```{r}
+auto = auto[!is.na(auto$num_of_doors),]
+miss_row = which(rowSums(is.na(auto[,-21])) > 0)
+miss_col = which(colSums(is.na(auto)) > 0)
+auto[miss_row, miss_col]
+```
+
+When imputing each column with regression, we fill the missing entries in the other columns not yet imputed by the mean. We first impute `bore`:
+```{r}
+i = miss_col[1]
+temp = auto
+```
+```{r}
+for(j in setdiff(miss_col, i)) {
+  temp[is.na(temp[, j]), j] = mean(temp[, j], na.rm = T)
+}
+```
+We regress the `bore` column with all the other covariate columns. Noticed that some missing data points have `num_of_cylinders=2` or `engine_type=rotor` or `fuel_system=4bbl` unique to the data point (all the other data points do not have this level). So, we omit these variables in the regression. 
+```{r,warning=FALSE}
+to_omit = which(colnames(auto) %in% c("engine_type", "num_of_cylinders", "fuel_system"))
+model_temp = lm(as.formula(paste0(names(auto)[i], "~.")), data = temp[, -c(to_omit, ncol(temp))])
+impute_row = which(is.na(auto[, i]))
+pred = predict.lm(model_temp, temp[impute_row, -c(i, 22, to_omit)], interval = "confidence")[, 1]
+auto[impute_row, i] = pred
+```
+
+Impute `stroke`:
+```{r}
+i = miss_col[2]
+temp = auto
+for (j in setdiff(miss_col, i)) {
+  temp[is.na(temp[, j]), j] = mean(temp[, j], na.rm = T)
+}
+```
+Again, some missing values have `num_of_cylinders=2` or `engine_type=rotor` or `fuel_system=4bbl` levels that are unique to the data points. So, we omit these variables in the regression.
+```{r,warning=FALSE}
+to_omit = which(colnames(auto) %in% c("engine_type", "num_of_cylinders", "fuel_system"))
+model_temp = lm(as.formula(paste0(names(auto)[i], "~.")), data = temp[,-c(ncol(temp), to_omit)])
+impute_row = which(is.na(auto[, i]))
+pred = predict.lm(model_temp, temp[impute_row,-c(i, 22, to_omit)], interval = "confidence")[, 1]
+auto[impute_row, i] = pred
+```
+
+Impute `peak_rpm`:
+```{r}
+i = miss_col[3]
+temp = auto
+for (j in setdiff(miss_col, i)) {
+  temp[is.na(temp[, j]), j] = mean(temp[, j], na.rm = T)
+}
+```
+Similarly, we noticed that some missing values uniquely have `make=renault`, and all the other data points used in the model does not have this level. So, we omit `make`in the regression. 
+```{r,warning=FALSE}
+to_omit = which(colnames(auto) == "make")
+model_temp = lm(as.formula(paste0(names(auto)[i], "~.")), data = temp[, -c(ncol(temp), to_omit)])
+impute_row = which(is.na(auto[, i]))
+pred = predict.lm(model_temp, temp[impute_row, -c(i, 22, to_omit)], interval = "confidence")[, 1]
+auto[impute_row, i] = pred
+```
+
+Impute `horsepower`:
+```{r}
+i = miss_col[4]
+temp = auto
+for (j in setdiff(miss_col, i)) {
+  temp[is.na(temp[, j]), j] = mean(temp[, j], na.rm = T)
+}
+```
+We noticed that some missing values have `make=renault`, and all the other data points used in the model does not have this level. So, we omit `make` in the regression.
+```{r,warning=FALSE}
+to_omit = which(colnames(auto) == "make")
+model_temp = lm(as.formula(paste0(names(auto)[i], "~.")), data = temp[, -c(ncol(temp), to_omit)])
+impute_row = which(is.na(auto[, i]))
+pred = predict.lm(model_temp, temp[impute_row, -c(i, 22, to_omit)], interval = "confidence")[, 1]
+auto[impute_row, i] = pred
+```
+
+Finally, impute `normalized_losses`:
+```{r}
+i = miss_col[5]
+temp = auto
+for (j in setdiff(miss_col, i)) {
+  temp[is.na(temp[, j]), j] = mean(temp[, j], na.rm = T)
+}
+```
+
+```{r, warning=FALSE}
+to_omit = which(colnames(auto) %in% c("num_of_cylinders", "make", "engine_type", "fuel_system"))
+model_temp = lm(as.formula(paste0(names(auto)[i], "~.")), data = temp[, -c(ncol(temp), to_omit)])
+impute_row = which(is.na(auto[, i]))
+pred = predict.lm(model_temp, temp[impute_row, -c(i, 22, to_omit)], interval = "confidence")[, 1]
+auto[impute_row, i] = pred
+```
+
+\section{3. Data Exploration and Diagnostics}
+In this section, we (a) perform an exploratory analysis on our data set and (b) perform preliminary diagnostics, identify and remove outliers that will potentially cause problems in our later analysis. 
+
+\subsection{3.1 Data Exploration}
+First, we plot the histogram for each numerical variable. We can see that most distributions are unimodal and not skewed. However, there are some extremely high values of `compression_rate` and `horsepower`, which might be causes of concern in later analysis. 
+```{r}
+par(mfrow = c(2, 3))
+num_col = c()
+for (i in 1:(ncol(auto) - 1)) {
+  if (class(auto[, i]) != "factor") {
+    num_col = c(num_col, i)
+    hist(auto[, i], main  = paste0("Histogram of ", colnames(auto)[i]),xlab = colnames(auto)[i])
+  }
+}
+factor_col = setdiff(1:(ncol(auto) - 1), num_col)
+```
+
+For categorical variables, converting them into integers will not make much sense unless they are ordinal. Nevertheless, we still check their correlations since some variables seem to have ordinal structures. 
+```{r}
+temp = auto[, -ncol(auto)]
+for (i in factor_col) {
+  temp[, i] = as.numeric(auto[, i])
+}
+cor_matrix = cor(temp)
+K = nrow(cor_matrix)
+par(cex = 0.55, mar = c(9, 9, 9, 9))
+image(
+  1:K,
+  1:K,
+  abs(cor_matrix),
+  xlab = '',
+  ylab = '',
+  axes = FALSE
+)
+axis(
+  side = 1,
+  at = 1:K,
+  labels = colnames(cor_matrix),
+  las = 3
+)
+axis(
+  side = 2,
+  at = 1:K,
+  labels = colnames(cor_matrix),
+  las = 2
+)
+colSums(abs(cor_matrix) > 0.8)
+```
+
+We can see that most covariates are only weakly correlated, but high correlations above $0.80$ do exist. In particular, `curb_weight` has the largest number of highly correlated covariates, which we should keep an eye on in the later analysis. `coompression_rate` and `fuel_type` has the highest (negative) correlation $-0.98$.
+
+\subsection{3.2 Preliminary Diagnostics}
+In this section, we perform preliminary diagnostics to further explore the structure of the data. In particular, we will carry outlier analysis and remove points of concern from the data for further analysis. First of all, we fit a model of `highway_mpg` against all other covariates without considering any interaction. 
+```{r}
+model_out = lm(highway_mpg ~ ., data = auto)
+```
+
+From the summary table in Appendix 1, we can see that the categorical covariates `engine_type` and `fuel_system` have some `NA` in their estimates -- an indication of some levels being linear combinations of the other covariates (i.e. the design matrix of this model does not have full rank). We investigate on this issue more closely.
+```{r}
+X_temp=model.matrix(model_out)
+rank_removed=sapply(1:ncol(X_temp),function(x){rankMatrix(X_temp[,-x])})
+dependentcol=which(rank_removed==rankMatrix(X_temp))
+colnames(X_temp)[dependentcol]
+```
+If a column of the design matrix is a linear combination of the other columns, then deleting that column from the matrix will not affect the matrix rank. Based on the results shown we can conclude that the covariates `engine_type` and `fuel_system` indeed have levels collinear with the other levels in our design matrix. This will cause problems in the following leverage point diagnostic and studentized residuals. Hence, we temporarily omit these two variables for the purpose of diagnostics. 
+```{r}
+to_omit = which(colnames(auto) %in% c("engine_type", "fuel_system"))
+model_out1 = lm(highway_mpg ~ ., data = auto[, -to_omit])
+```
+
+\subsubsection{Leverage}
+First, we check leverage points. There are indeed several points with high leverage. In particular, two points with low fitted value and one point with the largest fitted value have unusually high leverage. This is expected because points far outside the "typical" X's are considered as leverage points. 
+```{r}
+X = model.matrix(model_out1)
+H = (X %*% solve(t(X) %*% X, t(X)))
+lev = diag(H)
+plot(
+  model_out1$fit,
+  model_out1$res,
+  cex = 10 * lev,
+  xlab = "Fitted Values",
+  ylab = "Leverage"
+)
+```
+
+\subsubsection{Studentized Residuals}
+```{r, echo=FALSE, results='hide'}
+for(i in factor_col) {
+  temp = which(table(auto[, i]) == 1)
+  if (length(temp) != 0) {
+    print(c(colnames(auto)[i], temp))
+  }
+}
+```
+
+```{r, echo=FALSE, results='hide'}
+to_delete = c(
+  which(as.character(auto$make) == "mercury"),
+  which(as.character(auto$num_of_cylinders) == "three"),
+  which(as.character(auto$num_of_cylinders) == "twelve"),
+  which(as.character(auto$engine_type) == "dohcv"),
+  which(as.character(auto$fuel_system) == "mfi"),
+  which(as.character(auto$fuel_system) == "spfi")
+)
+data_temp = auto[-to_delete, ]
+```
+
+Then, we calculate which point has significant studentized residuals at the $0.05$ significance level, with Bonferroni correction. 
+```{r}
+model_out2 = lm(highway_mpg ~ ., data = data_temp[, -to_omit])
+n = nrow(data_temp)
+df = summary(model_out2)$df[1]
+res = abs(studres(model_out2))
+tval = qt(1 - 0.05 / 2 / n, df)
+```
+
+```{r}
+print(res[res > tval])
+print(paste0('Bonferroni-adjusted threshold: ', tval))
+```
+
+\subsubsection{Cook's Distance}
+The Cook's distance of a point $\left(\mathbf{x}_{i}, y_{i}\right)$ is a measure of influence given by the sum of the squares of the shift in fitted values when point $i$ is removed. The Cook's distance for the $i$th data point is defined to be
+$$C_{i}=\frac{\left(\hat{y}-\hat{y}_{-i}\right)^{T}\left(\hat{y}-\hat{y}_{-i}\right)}{p s^{2}}=\frac{r_{i}^{2} h_{i i}}{p\left(1-h_{i i}\right)}$$
+High influence occurs where there is a misfit and large leverage. A rough rule of thumb is that $\left|r_{i}\right|>2$ and $h_{i i}>2 p / n$ are separate causes for concern. Substituting into the equation above, points cause problems of concern if Cook's distance exceeds
+$$C_{k} \gtrsim \frac{8}{n-2 p}$$
+```{r}
+cooks = cooks.distance(model_out2)
+i = cooks > 8 / (nrow(data_temp) - 2 * (ncol(data_temp)))
+print(sort(cooks[which(i)]))
+```
+
+```{r, warning=FALSE}
+par(mfrow = c(1, 2))
+index = row.names(data_temp)
+plot(
+  cooks,
+  ylim = c(0, 0.65),
+  pch = 1 + 15 * i,
+  col = 1 + i,
+  ylab = "Cook’s Distance"
+)
+text(
+  x = which(i),
+  y = cooks[which(i)],
+  labels = index[which(i)],
+  srt = 90,
+  adj = -0.1
+)
+abline(8 / (n - 2 * ncol(auto)), 0, lty = 2)
+halfnorm(
+  cooks,
+  nlab = length(which(i)),
+  xlim = c(0, 2.5),
+  labs = index,
+  ylab = "Cook’s distances"
+)
+```
+
+From the above plots, we can see that data point $135$ has a significantly high Cook's distance, while the other points are below or near the boundary. We remove this data point along with the two points having significant studentized residual p-value. 
+```{r}
+delete = c(names(res)[res > tval], "135")
+auto = auto[-which(row.names(auto) %in% delete), ]
+```
+
+\subsubsection{Fitted Residual Plots}
+Using data with outliers removed, we fit a model of `highway_mpg` against all other covariates again without any interaction and look at the residual plot. From the residual plot, we can see that the constant variance assumption appears to be obeyed, but there are some extreme residuals around fitted `highway_mpg` equal to $40$. Also, there seems to be a negative trend among adjacent points. The model violation suggests variations in response unexplained by our covariates -- interactions between covariates will potentially be necessary. 
+```{r}
+model_out3 = lm(highway_mpg ~ ., data = auto)
+plot(model_out3$fit,
+     model_out3$res,
+     xlab = "Fitted Values",
+     ylab = "Residuals")
+abline(h = 0)
+```
+
+Plot the residual for each covariate
+```{r}
+# Appendix 3 for all plots
+par(mfrow = c(2, 3))
+for (i in num_col[1:6]) {
+  plot(auto[, i], model_out3$res, xlab = colnames(auto)[i])
+}
+```
+
+Observations & potential issues:
+* `num_of_cylinders` has most values concentrated at $4$, many levels have only a single observation 
+* `compression_rate` has two obvious clusters 
+* Most plots show one to two outlying residuals 
+* Possibly ordinal covariates: `num_of_doors`, `num_of_cylinders`, `drive_wheels`, `fuel_system` --- treat as factor or quantitative?
+
+\subsubsection{Partial Residual Plots}
+We also plot the partial residuals individually for the numerical covariates. Partial residual plots look at the marginal relationship between the response and the predictor after the effect of the other predictors has been removed. The trends in the plots are consistent with the coefficients in the fitted model. 
+```{r}
+# Appendix 4 for all plots
+par(mfrow = c(2, 3))
+for (i in num_col[1:6]) {
+  termplot(model_out3, partial.resid = TRUE, terms = i)
+}
+```
+
+From the diagnostic plots, there are no obvious non-linear trends between the residuals / partial residuals against the covariates. In addition, the constant variance assumption seems to hold. Therefore, we decide not to transform the response or any variable. 
+
+\newpage
+\section{4. Model Selection}
+\subsection{4.1 Initial Regression}
+First of all, we fit a model of `highway_mpg` against all the other covariates without considering interactions. From the ANOVA table, the covariates that are significant at the $0.05$ level are `make`, `fuel_type`, `wheel_base`, `length`, `width`, `height`, `curb_weight`, `num_of_cylinders`, `engine_type`, `fuel_system`, `aspiration`, `bore` and `compression_rate`. 
+```{r 4_1a}
+model_1 = lm(highway_mpg ~ ., data=auto)
+anova_1 = anova(model_1)
+anova_1
+```
+
+We remove all insignificant covariates and refit the model -- all covariates in the reduced model are now significant at the $0.05$ threshold. 
+```{r 4_1b}
+anova_1 = anova_1[1:(dim(anova_1)[1] - 1), ]
+selected = rownames(anova_1[anova_1[, "Pr(>F)"] < 0.05, ])
+excluded = rownames(anova_1[anova_1[, "Pr(>F)"] >= 0.05, ])
+model_1a = lm(highway_mpg ~ ., data = auto[, c("highway_mpg", selected)])
+anova_1a = anova(model_1a)
+anova_1a
+```
+
+It should be pointed out that the F-statistics from ANOVA are highly dependent on the order of the covariates being included, and changing the order may affect our conclusion about the variable significance. To address this issue, we use F-test to compare model `model_1a` against models with one additional insignificant covariate added back, one at a time. From the result below, we verify that the excluded covariates are indeed insignificant. We will work with the smaller model from this point on. 
+```{r 4_1c}
+for (exc in excluded) {
+  md = lm(highway_mpg ~ ., data = auto[, c("highway_mpg", selected, exc)])
+  F_stat = format(round(anova(model_1a, md)[, "Pr(>F)"][2], 3), nsmall = 3)
+  cat(paste0("F-statistic=", F_stat),
+      "with",
+      exc,
+      "added back",
+      "\n")
+}
+```
+
+\subsection{4.2 Interactions}
+Next, we consider models that include two-way interactions between the selected covariates. It is tempting to include all possible two-way interactions between the selected the covariates and perform backward elimination to select the set of significant covariates. However, we note that the number of interactions overshoots the $158$ degrees of freedom remaining -- making estimation of the coefficients impossible. In addition, the large number of degrees of freedom will likely to cause huge multiple testing issues -- many coefficients could appear to be significant by random chance. To address the two issues, we carry out a forward selection procedure and adopt a more conservative significance threshold. 
+
+At each step, we progressively add one additional interaction into `model_1a` and evaluated the F-statistic compared with `model_1a`. We include an interaction if the F-statistic is below the $0.01$ significance threshold. 
+```{r 4_2a}
+forward = function (formula_init, model_init) {
+  inter_li = c()
+  F_stat_li = c()
+  for (sel_i in selected) {
+    for (sel_j in selected) {
+      if (sel_i != sel_j) {
+        inter = paste0(sel_i, ":", sel_j)
+        formula_2_temp = paste0(formula_init, "+", inter)
+        model_2_temp = lm(formula_2_temp, data = auto[, c("highway_mpg", selected)])
+        F_stat = anova(model_init, model_2_temp)[, "Pr(>F)"][2]
+        if (!is.na(F_stat)) {
+          inter_li = c(inter_li, inter)
+          F_stat_li = c(F_stat_li, F_stat)
+        }
+      }
+    }
+  }
+  return(list(min(F_stat_li), inter_li[which.min(F_stat_li)]))
+}
+```
+
+```{r 4_2b}
+formula_1a = paste0("highway_mpg ~ ", paste0(selected, collapse = "+"))
+output_2a = forward(formula_1a, model_1a)
+F_stat_2a = output_2a[[1]]
+inter_2a = output_2a[[2]]
+cat("The most significant F-statistics:",
+    F_stat_2a,
+    "achieved with",
+    inter_2a)
+```
+
+We notice that the degrees of freedom taken by the interaction `make:compression_rate` is $15$, lower than the $21$ degrees of freedom we anticipate. This is due to exact collinearity between the interaction term and `make` (the covariate `compression_rate` is numeric but only takes upon a discrete set of values). Some coefficients cannot be appropriately estimated. This problem will be addressed in Section 5 of the report. We repeat the forward selection until exhausting interaction terms significant at the $0.01$ significance level.  
+```{r 4_2c}
+formula_2a = paste0(formula_1a, "+", inter_2a)
+model_2a = lm(formula_2a, data = auto[, c("highway_mpg", selected)])
+anova(model_2a)
+```
+
+```{r 4_2d}
+formula_step = formula_2a
+model_step = model_2a
+F_stat_step = F_stat_2a
+inter_step = inter_2a
+
+while (F_stat_step < 0.01) {
+  output_step = forward(formula_step, model_step)
+  F_stat_step = output_step[[1]]
+  inter_step = output_step[[2]]
+  if (F_stat_step >= 0.01) {
+    break
+  }
+  formula_step = paste0(formula_step, "+", inter_step)
+  cat("The most significant F-statistics:",
+      F_stat_step,
+      "achieved with",
+      inter_step,
+      "\n")
+  model_step = lm(formula_step, data = auto[, c("highway_mpg", selected)])
+}
+```
+
+The significant interactions are `make:compression_rate`, `length:compression_rate` and `fuel_type:compression_rate`. 
+```{r 4_2e}
+formula_2b = formula_step
+model_2b = model_step
+anova_2b = anova(model_2b)
+anova_2b
+```
+
+\subsubsection{Adding Back Covariates}
+It is still possible that one or more of the covariates removed in `model_1a` might be significant once we allow for interactions, which we now test one at a time with the F-test. For each of the covariates removed in `model_1a`, we include its two-way interactions with the selected covariates and compare with the model `model_2b`. 
+```{r 4_2f}
+for (exc in excluded) {
+  formula_md = paste0(formula_2b, "+", exc, "*", "(", paste0(selected, collapse="+"), ")")
+  md = lm(formula_md, data = auto[, c("highway_mpg", selected, exc)])
+  F_stat = format(round(anova(model_2b, md)[, "Pr(>F)"][2], 3), nsmall=3)
+  cat(paste0("F-statistic=", F_stat), "with", exc, "added back (allowing for interactions)", "\n")
+}
+```
+
+We observe that `body_style` and `drive_wheels` now appear to be more significant than when the terms are included individually. Both of them are now significant at the $0.05$ level, though not meeting our $0.01$ threshold for including additional interaction terms. In particular, the significance of `drive_wheels` comes from its interaction with `curb_weight`. 
+```{r 4_2g}
+formula_3 = paste0(formula_2b, "+", "drive_wheels", "*", "(", paste0(selected, collapse="+"), ")")
+model_3 = lm(formula_3, data = auto[, c("highway_mpg", selected, "drive_wheels")])
+anova_3 = anova(model_3)
+anova_3
+```
+
+\subsubsection{Degrees of Freedom}
+The `model_2b` now takes up $63$ degrees of freedom (among the total $203$ degrees of freedom available). We will not further consider higher order interactions to avoid having models with intractably high number of covariates, poor interpretability or potentially insufficient degrees of freedom for inference. 
+```{r 4_2l}
+anova_2b = anova_2b[1:(dim(anova_2b)[1] - 1), ]
+sum(anova_2b[, "Df"])
+```
+
+\newpage 
+\section{5. Parameter Estimation}
+\subsection{5.1 Elastic Net Regression}
+Having selected the group of significant covariates and interactions, we now perform estimation and inference on them. From `summary(lm(...))` for `model_2b` (as illustrated in Appendix 2), we observe that the coefficients of several covariates cannot be properly estimated, nor can inference be drawn. This is not due to the lack of degrees of freedom, as discussed in the previous section. Instead, we experience exact collinearity between levels within categorical covariates -- which suggests the use of Ridge to eliminate singularity and improve stability. In addition, the dimensionality of the model is still very large. It would be advisable to further reduce the number of covariates and improve model interpretability -- which suggests the use of LASSO/sparse regression. 
+```{r 5_1a}
+X = model.matrix(model_2b)
+Y = as.matrix(auto["highway_mpg"])
+```
+
+Without better guidance on the choice of Ridge/LASSO and the penalty level, we run regressions with elastic net (which combines both Ridge & LASSO penalties) and perform grid search using `cv.glmnet` with $\alpha$ (the relative size of Ridge vs. LASSO) and $\lambda$ (the penalty strength) as parameters. 
+```{r 5_1b}
+set.seed(4)
+alphas = seq(from = 0.0, to = 1.0, by = 0.02)
+lbd_mins = c()
+mse_mins = c()
+
+par(mfrow = c(1, 2))
+for (alpha in alphas) {
+  cv_fit = cv.glmnet(X, Y, alpha = alpha)
+  lbd_mins = c(lbd_mins, cv_fit$lambda.min)
+  mse_mins = c(mse_mins, min(cv_fit$cvm))
+  if (alpha == 0 || alpha == 1) {
+    plot(cv_fit)
+    if (alpha == 0) {
+      title(paste0("Ridge"), line = 2.5)
+    }
+    if (alpha == 1) {
+      title(paste0("LASSO"), line = 2.5)
+    }
+  }
+}
+```
+
+We look for the $\alpha$, $\lambda$ combination that minimizes the out-of-sample mean-squared error. The selected $\hat{\alpha}=0.80$ suggests a model that favors LASSO (sparsity) over Ridge (stability). 
+```{r 5_1c}
+set.seed(10)
+mse_min = which.min(mse_mins)
+alp_min = format(round(alphas[which.min(mse_mins)], 2), nsmall = 2)
+lbd_min = format(round(lbd_mins[which.min(mse_mins)], 2), nsmall = 2)
+cat(paste0("Minimum MSE obtained with alpha=", alp_min),
+    paste0("and lambda=", lbd_min))
+```
+
+The coefficients estimated for this final model are summarized below, which indeed show a high degree of sparsity. 
+```{r 5_1d}
+model_final = glmnet(X, Y, alpha=alp_min, lambda=lbd_min)
+coef(model_final)
+```
+
+\subsection{5.2 Pairwise Comparisions}
+In our final model, we have found a set of significant categorical covariates `make`, `num_of_cylinders` and `fuel_system` (suggesting that the levels within each covariate do not all share the same mean). We are also interested in knowing for which pairs of levels are the effects different for each categorical covariate, which we now investigate with Tukey's HSD test at the customary $0.05$ significance level. 
+```{r}
+plot_tukey = function(index, p_adj) {
+  K = length(index)
+  plot(
+    -1:1,
+    -1:1,
+    type = "n",
+    axes = FALSE,
+    xlab = "",
+    ylab = "",
+    asp = 1
+  )
+  title(
+    main = paste0(
+      "# Rejections: ",
+      sum(p_adj <= 0.05),
+      " (",
+      "among ",
+      choose(length(index), 2),
+      ")"
+    ),
+    cex.main = 0.8
+  )
+  
+  # plot the texts
+  for (i in 1:K) {
+    theta = i / K * 2 * pi
+    text(cos(theta), sin(theta), index[i])
+  }
+  
+  # plot the segments
+  for (i in 1:K) {
+    for (j in 1:K) {
+      theta_i = i / K * 2 * pi
+      theta_j = j / K * 2 * pi
+      str = paste0(index[i], "-", index[j])
+      if (str %in% names(p_adj) & p_adj[str] <= 0.05) {
+        segments(cos(theta_i),
+                 sin(theta_i),
+                 cos(theta_j),
+                 sin(theta_j),
+                 col = "red")
+      }
+    }
+  }
+}
+```
+
+In the plots below, we draw a line between each pair of levels for which the Tukey's HSD test is rejected. We observed that for the `num_of_cylinders`, the main difference comes from level `num_of_cylinders=two` versus the others. For `fuel_system`, the difference mainly comes from `fuel_system=spdi` against the rest. 
+```{r, warning=FALSE}
+par(mfrow=c(1, 2))
+
+# num_of_cylinders
+index = c("two", "three", "four", "five", "six", "eight", "twelve")
+tukey = TukeyHSD(aov(model_2b), "num_of_cylinders")
+p_adj = tukey[[names(tukey)]][, "p adj"]
+plot_tukey(index, p_adj)
+
+# fuel_system
+index = unique(auto[, "fuel_system"])
+tukey = TukeyHSD(aov(model_2b), "fuel_system")
+p_adj = tukey[[names(tukey)]][, "p adj"]
+plot_tukey(index, p_adj)
+```
+
+For the `make` variable, which has `22` distinct levels, a very large fractions of pairwise comparisons are significant. This agrees with our previous analysis that the covariate is highly significant with great explanatory power. 
+```{r, warning=FALSE}
+# make
+index = unique(auto[, "make"])
+tukey = TukeyHSD(aov(model_2b), "make")
+p_adj = tukey[[names(tukey)]][, "p adj"]
+plot_tukey(index, p_adj)
+```
+
+\section{6. Conclusion}
+In this report, we have used the `auto` data set to build a linear model for the response `highway_mpg` -- the car’s performance in miles per gallon during highway driving, with all the other variables as potential covariates. We have performed diagnostics to find outliers with high studentized residuals or Cook’s distance. We then carried out model selection to find a set of significant covariates `make`, `fuel_type`, `wheel_base`, `length`, `width`, `height`, `curb_weight`, `num_of_cylinders`, `engine_type`, `fuel_system`, `aspiration`, `bore`, `compression_rate` and interactions `make:compression_rate`, `length:compression_rate`, `fuel_type:compression_rate`. In the end, we used cross-validation to obtain an elastic net model with the selected covariates that have great out-of-sample predictive power. 
+
+\subsubsection{Further Work}
+\textbf{Exact collinearity:} Early in our exploratory data analysis, we have seen many pairs of collinear covariates in our data, whose effects on the response tends to be quite similar. However, we notice that in our model selection procedure, especially when adding interaction terms, the terms being included are highly dependent upon the order in which they appear in the F-test (i.e. if a covariate is already added to the model, covariates with similar effects added later are likely to be insignificant). We could run our model selection with different ordering of the covariates, and ideally come up with a model with the best explanatory power and physical interpretation.  
+
+\textbf{Selective inference:} One drawback of our methodology is that we have used the same data set for model selection and estimation/inference of model coefficients (both of which are run on the whole data set). The significance of some covariates (interaction terms, in particular) is very near to the $0.05$ significance level, suggesting only weak associations with the response, which may in fact be false positive. A better approach would be to split the data set into a training set and a validation set (e.g. 70/30 split), using the first group for selection and the subsequent group for estimation/inference. However, given the small data set we have (with only $203$ observations), such an approach may introduce undesirably high variance in the estimated coefficients. Cross-validation will alleviate this issue.  
+
+\textbf{Inference for elastic net:} Another drawback of our investigation is that our final model is fitted with elastic net which does not come directly with estimates for standard error / confidence interval. Further work can be done to use bootstrap to create inference for the estimated coefficients. 
+
+\newpage 
+\subsection{Appendix 1: Coefficients of the Preliminary Model}
+```{r}
+summary(model_out)
+```
+
+\newpage 
+\subsection{Appendix 2: Coefficients of the Selected Model with Interactions}
+```{r}
+summary(model_2b)
+```
+
+\newpage 
+\subsection{Appendix 3: Fitted Residual Plots for Diagonistics}
+```{r}
+par(mfrow = c(2, 3))
+for (i in factor_col) {
+  plot(as.numeric(auto[, i]),
+       model_out3$res,
+       axes = FALSE,
+       xlab = colnames(auto)[i])
+  axis(
+    side = 1,
+    at = 1:length(levels(auto[, i])),
+    lab = levels(auto[, i])
+  )
+  axis(side = 2)
+}
+for (i in num_col) {
+  plot(auto[, i], model_out3$res, xlab = colnames(auto)[i])
+}
+```
+
+\newpage 
+\subsection{Appendix 4: Partial Residual Plots for Diagonistics}
+```{r}
+par(mfrow = c(2, 3))
+for (i in num_col) {
+  termplot(model_out3, partial.resid = TRUE, terms = i)
+}
+```
